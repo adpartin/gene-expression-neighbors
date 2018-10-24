@@ -12,7 +12,9 @@ from pilot1_imports import *
 def gen_single_rna_for_each_pdm_model(pdm_rna, pdm_meta):
     """ Generates rna and meta dataframes such that each row corresponds to a single pdm model.
     The gene expression profiles for each model are averaged to create a single represenation of
-    of the pdm model. """
+    of the pdm model.
+    !! This is not a preferable appraoch because of heterogenity within PDM models !!
+    """
     pdm_rna = pdm_rna.copy()
     pdm_meta = pdm_meta.copy()
 
@@ -58,7 +60,7 @@ def knn_for_single_rna(cells_rna,  cells_meta,
                        label=None, ref_col_name='Sample', 
                        dist_metrics_list=[('minkowski', 1), ('minkowski', 2), ('chebyshev', None)],
                        n_neighbors=5, algorithm='brute'):
-    """ Computes knn for a single rna expression (e.g., single pdm model) using multiple distance metrics. 
+    """ Compute knn for a single rna expression (e.g., single pdm model) using multiple distance metrics. 
     Args:
         dist_metrics_list : list of tuples; each tuple is (distance_name, distance_params), e.g., ('minkowski', 2)
         ref_col_name : reference column between single_rna and single_meta
@@ -86,33 +88,32 @@ def knn_for_single_rna(cells_rna,  cells_meta,
 
         # Write results into appropriate tables
         if i == 0:
-            table_samples = knn_obj.table_samples.copy()
-            table_distances = knn_obj.table_distances.copy()
-            table_labels = knn_obj.table_labels.copy()
+            knn_samples = knn_obj.knn_samples.copy()
+            knn_distances = knn_obj.knn_distances.copy()
+            knn_labels = knn_obj.knn_labels.copy()
         else:
-            table_samples = pd.concat([table_samples, knn_obj.table_samples], axis=0)
-            table_distances = pd.concat([table_distances, knn_obj.table_distances], axis=0)
-            table_labels = pd.concat([table_labels, knn_obj.table_labels], axis=0)
+            knn_samples = pd.concat([knn_samples, knn_obj.knn_samples], axis=0)
+            knn_distances = pd.concat([knn_distances, knn_obj.knn_distances], axis=0)
+            knn_labels = pd.concat([knn_labels, knn_obj.knn_labels], axis=0)
             
     # reset index because all indices are the same (rna expression)
-    table_samples.reset_index(drop=True, inplace=True)
-    table_distances.reset_index(drop=True, inplace=True)
-    table_labels.reset_index(drop=True, inplace=True)
-    # table_labels.drop(columns=['match_total_wgt', 'match_first'], inplace=True)
+    knn_samples.reset_index(drop=True, inplace=True)
+    knn_distances.reset_index(drop=True, inplace=True)
+    knn_labels.reset_index(drop=True, inplace=True)
 
-    return table_samples, table_distances, table_labels
+    return knn_samples, knn_distances, knn_labels
 
 
-def process_knn_multi_metrics(table_samples, table_distances, table_labels, label=None):
+def process_knn_multi_metrics(knn_samples, knn_distances, knn_labels, label=None):
     """ Process knn results from knn_for_single_rna(). """
     # Flatten sample and distance tables and concat horizontally
-    c0 = pd.DataFrame(table_samples.iloc[:, 1:].values.ravel()).rename(columns={0: 'Sample'})
-    c1 = pd.DataFrame(table_labels.iloc[:, 3:].values.ravel()).rename(columns={0: label})
+    c0 = pd.DataFrame(knn_samples.iloc[:, 1:].values.ravel()).rename(columns={0: 'Sample'})
+    c1 = pd.DataFrame(knn_labels.iloc[:, 3:].values.ravel()).rename(columns={0: label})
 
     # normalize values
-    for r in range(table_distances.shape[0]):
-        table_distances.iloc[r, 1:] = table_distances.iloc[r, 1:] / table_distances.iloc[r, 1:].sum()
-    c2 = pd.DataFrame(table_distances.iloc[:, 1:].values.ravel()).rename(columns={0: 'dist'})
+    for r in range(knn_distances.shape[0]):
+        knn_distances.iloc[r, 1:] = knn_distances.iloc[r, 1:] / knn_distances.iloc[r, 1:].sum()
+    c2 = pd.DataFrame(knn_distances.iloc[:, 1:].values.ravel()).rename(columns={0: 'dist'})
 
     tt = pd.concat([c0, c1, c2], axis=1)
     tt['count'] = 1
@@ -137,13 +138,13 @@ def knn_for_single_rna_summary(cells_rna,  cells_meta,
     meta = meta.copy()
 
     knn_samples = pd.DataFrame(index=range(df_rna.shape[0]),
-                               columns=['Sample'] + ['nbr {}'.format(n) for n in range(n_neighbors)])
+                               columns=['Sample'] + [f'nbr{n}' for n in range(n_neighbors)])
 
     knn_labels = pd.DataFrame(index=range(df_rna.shape[0]),
-                              columns=['Sample', label, 'match_total'] + ['nbr {}'.format(n) for n in range(n_neighbors)])
+                              columns=['Sample', label, 'total_matches'] + [f'nbr{n}' for n in range(n_neighbors)])
 
     knn_distances = pd.DataFrame(index=range(df_rna.shape[0]),
-                                 columns=['Sample'] + ['nbr {}'.format(n) for n in range(n_neighbors)])
+                                 columns=['Sample'] + [f'nbr{n}' for n in range(n_neighbors)])
 
 
     # Choose distance metrics to compute
@@ -165,9 +166,9 @@ def knn_for_single_rna_summary(cells_rna,  cells_meta,
                                          label, ref_col_name, 
                                          dist_metrics_list,
                                          n_neighbors, algorithm)
-        table_samples, table_distances, table_labels = knn_results
+        knn_samples, knn_distances, knn_labels = knn_results
         
-        tt = process_knn_multi_metrics(table_samples, table_distances, table_labels, label)
+        tt = process_knn_multi_metrics(knn_samples, knn_distances, knn_labels, label)
         
         # Assign to the final table
         knn_samples.loc[i, 'Sample'] = name
@@ -181,7 +182,7 @@ def knn_for_single_rna_summary(cells_rna,  cells_meta,
         query_label = single_meta[label].values[0]
         knn_labels.loc[i, 'Sample'] = name
         knn_labels.loc[i, label] = query_label
-        knn_labels.loc[i, 'match_total'] = tt.loc[:n_neighbors-1, label].tolist().count(query_label)
+        knn_labels.loc[i, 'total_matches'] = tt.loc[:n_neighbors-1, label].tolist().count(query_label)
         knn_labels.iloc[i, 3:] = tt.loc[:n_neighbors-1, label].values.tolist()  # get the sample names of the closest k neighbors
             
     return knn_samples, knn_labels, knn_distances
