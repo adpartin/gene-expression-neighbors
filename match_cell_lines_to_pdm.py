@@ -1,3 +1,12 @@
+"""
+Take the k (=10) closest cell lines to every PDM sample (computed above).
+Then we analyze each PDM model separately. Out of all the neighbors we found
+(k X number of pdm samples in a model), we extract a total of `total_cells_needed`
+cells that are the closest **to the entire pdm group**. The exact heuristic is
+described in the code below. Note that the heuristic favors cell lines that appear
+as close neighbors for multiple pdm samples as opposed to cell lines that appears
+very close to only a small subset of pdm samples.
+"""
 import os
 import sys
 import argparse
@@ -5,126 +14,125 @@ import time
 
 import numpy as np
 import pandas as pd
+
+import matplotlib
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
+import seaborn as sns
 
+# Utils
 file_path = os.path.dirname(os.path.relpath(__file__))
-utils_path = os.path.abspath(os.path.join(file_path, '..', 'utils_py'))
+utils_path = os.path.abspath(os.path.join(file_path, 'utils_py'))
 sys.path.append(utils_path)
+import utils_all as utils
 
-from pilot1_imports import *
-from utils import *
+import warnings
+warnings.filterwarnings('ignore')
 
-DATAPATH = '/Users/apartin/work/jdacs/Benchmarks/Data/Pilot1'
-PDM_METADATA_FILENAME = 'combined_metadata_2018May.txt'
+DATADIR = '/Users/apartin/work/jdacs/Benchmarks/Data/Pilot1'
+METADATA_FILENAME = 'combined_metadata_2018May.txt'
+OUTDIR = './cell_line_recommendations_michael'
 DEFAULT_DATATYPE = np.float16
-SEED = 2018
-
-
-def get_float_format(name):
-	""" From CANDLE """
-    mapping = {}
-    mapping['f16'] = np.float16
-    mapping['f32'] = np.float32
-    mapping['f64'] = np.float64
-
-    mapped = mapping.get(name)
-    if not mapped:
-        raise Exception('No mapping found for "{}"'.format(name))
-    return mapped
+SEED=0
 
 
 def init_params():
-    parser = argparse.ArgumentParser(description='Match k-NN cell lines to PDM.')
-    # parser.add_argument('-out', '--outdir', dest='outdir',
-    #                     default='.',
-    #                     help='output dir to store the normalized rnaseq file')
-    # parser.add_argument('-f', '--in_fname', dest='in_fname',
-    #                     default='combined_rnaseq_data_lincs1000',
-    #                     help='rnaseq filename to normalize')
-    # parser.add_argument('-ff', '--float_format', dest='float_format',
-    #                     default=argparse.SUPPRESS,
-    #                     choices=['f16', 'f32', 'f64'],
-    #                     help='float format of the output file')
-
-    parser.add_argument('-n', '--n_neighbors', dest='n_neighbors',
-	                    type=int,
-	                    help='number of nearest neighbors to find')
+    parser = argparse.ArgumentParser(description='Find nearest cell lines to each PDM model.')
+    parser.add_argument('-k', '--total_cells_per_pdm_model', dest='total_cells_per_pdm_model',
+	                    type=int, default=10,
+	                    help='Total number of cells to find for each PDM model.')
     return parser.parse_args()
 
 
 def run(args):
     print(args)
-        dataset = args.in_fname
-    outdir = args.outdir
-    if ~hasattr(args, 'float_format'):
-        float_format = DEFAULT_DATATYPE
-    elif args.float_format in set(['f16', 'f32', 'f64']):
-        get_float_format(args.float_format)
-
+    total_cells_per_pdm_model = args.total_cells_per_pdm_model
+    utils.make_dir(path=OUTDIR)
 
     # Load data
-    # dataset = 'combined_rnaseq_data'
-    # dataset = 'combined_rnaseq_data_lincs1000'
-    df_rna = load_combined_rnaseq(dataset=os.path.join(DATAPATH, dataset), chunksize=2000, verbose=True)
-	meta = pd.read_csv(os.path.join(DATAPATH, PDM_METADATA_FILENAME), sep='\t')
-	meta = update_metadata_comb_may2018(meta)
-	meta = extract_specific_datasets(meta, datasets_to_keep=datasets_to_keep)
-	df_rna, meta = update_df_and_meta(df_rna, meta, on='Sample')
+    SOURCES = ['ccle', 'nci60', 'ncipdm']
+    lincs = utils.CombinedRNASeqLINCS(dataset='combat', datadir=DATADIR,
+                                      metadata_filename=METADATA_FILENAME, sources=SOURCES)
+    
+    # Extract separately the pdm data, and the cell lines data
+    pdm_rna, pdm_meta = lincs.get_subset(sources=['ncipdm'])
+    cell_rna, cell_meta = lincs.get_subset(sources=['ccle', 'nci60'])
 
-	# Create meta for each source
-	ccle_meta = meta[meta['source']=='ccle'].reset_index(drop=True)
-	nci_meta  = meta[meta['source']=='nci60'].reset_index(drop=True)
-	pdm_meta  = meta[meta['source']=='ncipdm'].reset_index(drop=True)
+    # Compute kNN
+    label = 'simplified_csite'
+    ref_col_name = 'Sample'
+    algorithm = 'brute'
+    n_neighbors = 10
+    metric = 'minkowski'
+    p = 2
 
-	# Create rna for each source
-	ccle_rna, ccle_meta = update_df_and_meta(df_rna, ccle_meta, on='Sample')
-	nci_rna,  nci_meta  = update_df_and_meta(df_rna, nci_meta,  on='Sample')
-	pdm_rna,  pdm_meta  = update_df_and_meta(df_rna, pdm_meta,  on='Sample')
+    # Use Euclidean
+    knn = utils.kNNrnaseq(df_train   = cell_rna,
+                          meta_train = cell_meta,
+                          df_test    = pdm_rna,
+                          meta_test  = pdm_meta,
+                          ref_col_name = ref_col_name,
+                          label = label, 
+                          n_neighbors = n_neighbors,
+                          algorithm = algorithm,
+                          metric='minkowski', p=2)
+    knn.fit()
+    knn.neighbors()
+    knn.summary()
 
-	# Concat cell lines data
-	cells_rna = pd.concat([nci_rna, ccle_rna], axis=0).reset_index(drop=True)
-	cells_meta = pd.concat([nci_meta, ccle_meta], axis=0).reset_index(drop=True)
+    knn_samples = knn.knn_samples.copy()
+    knn_distances = knn.knn_distances.copy()
 
+    pdm = pdm_meta[['Sample', 'core_str', label, 'descr']]
+    knn_samples = pdm.merge(knn_samples, on='Sample').rename(columns={'core_str': 'pdm_model', label: 'label',
+                                                                      'descr': 'passage'})
+    knn_distances = pdm.merge(knn_distances, on='Sample').rename(columns={'core_str': 'pdm_model', label: 'label',
+                                                                          'descr': 'passage'})
 
+    tb_samples = pd.DataFrame(index=range(len(knn_samples['pdm_model'].unique())),
+                              columns=[['pdm_model'] + [f'nbr{c+1}' for c in range(n_neighbors)]])
+    tb_count = tb_samples.copy()
 
-	# m_rna, m_meta = gen_single_rna_for_each_pdm_model(pdm_rna, pdm_meta)
-	# knn_results = knn_for_single_rna_summary(cells_rna, cells_meta,
-	# 										 m_rna, m_meta,
-	# 										 label='simplified_csite')
-	# knn_samples, knn_labels, knn_distances = knn_results
+    total_cells_per_pdm_model = 10  # total number of cells to query for the entire PDM model
+    for i, model_name in enumerate(knn_samples['pdm_model'].unique()):
+        tb_samples.loc[i, 'pdm_model'] = model_name
+        tb_count.loc[i, 'pdm_model'] = model_name
+        
+        # Extract the knn cell lines for all the samples of the current pdm model
+        samples = knn_samples[knn_samples['pdm_model']==model_name]
+        samples = samples[[c for c in samples.columns if 'nbr' in c]]
 
-	# knn_results = knn_for_single_rna_summary(pdm_rna, pdm_meta,
-	# 										 pdm_rna, pdm_meta,
-	# 										 label='simplified_csite')
-	# knn_samples, knn_labels, knn_distances = knn_results
-
-	# knn_samples.to_csv('knn_samples.csv', index=False)
-	# knn_labels.to_csv('knn_labels.csv', index=False)
-	# knn_distances.to_csv('knn_distances.csv', index=False)
-
-
-	# Compute using only euclidean
-	label = 'simplified_csite'
-	ref_col_name = 'Sample'
-	algorithm = 'brute'
-	n_neighbors = 5
-	metric = 'minkowski'
-	p = 2
-
-    knn_obj = kNNrnaseq(df_train = cells_rna,
-                        meta_train = cells_meta,
-                        df_test = pdm_rna,
-                        meta_test = pdm_meta,
-                        label = label, ref_col_name = ref_col_name,
-                        n_neighbors = n_neighbors, algorithm = algorithm,
-                        metric = metric, p = p, metric_params = metric_params)
+        # Extract the knn cell line distances for all the samples of the current pdm model
+        dist = knn_distances[knn_distances['pdm_model']==model_name]
+        dist = dist[[c for c in dist.columns if 'nbr' in c]]
+        
+        # 'tmp' contains a compiled list of the closest k cell lines to every pdm sample within the model
+        tmp = pd.DataFrame({'Sample': samples.values.ravel(), 'dist': dist.values.ravel()})
+        tmp['dist'] = tmp['dist'].astype('float')  # why ravel() converts the values to `object`??
+        tmp['count'] = 1
+        
+        # the 'count' col contains the number of times each cell line is encountered
+        tmp = tmp.groupby(['Sample']).agg({'dist': 'sum', 'count': 'sum'}).reset_index()
+        # tmp = tmp.groupby(['Sample']).agg({'dist': 'mean', 'count': 'sum'}).reset_index()
+        # tmp = tmp.groupby(['Sample']).agg({'dist': 'median', 'count': 'sum'}).reset_index()
+        
+        # sort rows by count and distance
+        tmp = tmp.sort_values(['count', 'dist'], ascending=[False, True]).reset_index(drop=True)
+        
+        # Finally, retain the most 'significant' cell lines
+        tb_samples.iloc[i, 1:] = tmp['Sample'][:total_cells_per_pdm_model].values
+        tb_count.iloc[i, 1:] = tmp['count'][:total_cells_per_pdm_model].values
 	        
-    knn_obj.fit()
-    knn_obj.neighbors()
-    print(knn_obj.table_labels['match_total'].sum())
-    knn_samples.to_csv('knn_samples_euclidean.csv', index=False)
-	knn_labels.to_csv('knn_labels_euclidean.csv', index=False)
-	knn_distances.to_csv('knn_distances_euclidean.csv', index=False)
+    # Save results
+    tb_samples.to_csv(os.path.join(OUTDIR, 'samples.csv'), index=False)
+    tb_count.to_csv(os.path.join(OUTDIR, 'count.csv'), index=False)
+    
+    # Save raw knn tables
+    knn.knn_samples.to_csv(os.path.join(OUTDIR, 'knn_samples.csv'), index=False)
+    knn.knn_labels.to_csv(os.path.join(OUTDIR, 'knn_labels.csv'), index=False)
+    knn.knn_distances.to_csv(os.path.join(OUTDIR, 'knn_distances.csv'), index=False)
+        
+
 
 
 def main():
